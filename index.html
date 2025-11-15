@@ -112,10 +112,14 @@
 <nav>Gold Trade Empire Simulation</nav>
 
 <div class="container">
+    <div class="card" id="priceDisplay">$ 0.00 / oz</div>
+    <div class="card" id="availableDisplay">Available: 0.00 oz</div>
+    <div class="card" id="marketStatus">Market: <span id="marketStatusText">idle</span><br><button onclick="fetchMarket()" style="margin-top:8px;padding:8px;border-radius:10px;">Refresh Market</button></div>
     <div class="card" id="moneyDisplay">$ Loading...</div>
     <div class="card" id="goldDisplay">Loading... oz</div>
     <button onclick="openBuyPopup()">BUY GOLD</button>
     <button onclick="openSellPopup()">SELL GOLD</button>
+        <button onclick="openAccountPopup()" style="background:#333;color:#f2c94c;margin-top:8px;">ACCOUNT</button>
 </div>
 
 <div class="footer">
@@ -146,108 +150,311 @@
     </div>
 </div>
 
+<!-- ACCOUNT POPUP -->
+<div id="accountPopup" class="popup">
+    <div class="popup-box">
+        <h2>Account</h2>
+        <div id="authTabs">
+            <button id="showSignIn" onclick="showSignIn()" style="margin:6px;padding:10px;border-radius:10px;">Sign In</button>
+            <button id="showSignUp" onclick="showSignUp()" style="margin:6px;padding:10px;border-radius:10px;">Sign Up</button>
+        </div>
+
+        <div id="signInBox" style="display:none;">
+            <input id="signinEmail" type="email" placeholder="Email" />
+            <input id="signinPassword" type="password" placeholder="Password" />
+            <br><br>
+            <button onclick="signIn()">Sign In</button>
+        </div>
+
+        <div id="signedInBox" style="display:none;">
+            <p>Signed in as <b id="signedInEmail"></b></p>
+            <button onclick="signOut()" style="background:#c0392b;color:white;">Sign Out</button>
+        </div>
+
+        <div id="signUpBox" style="display:none;">
+            <input id="signupEmail" type="email" placeholder="Email" />
+            <input id="signupPassword" type="password" placeholder="Password" />
+            <br><br>
+            <button onclick="signUp()">Create Account</button>
+        </div>
+
+        <br>
+        <button onclick="closeAccountPopup()" style="background:#444;color:white;">Close</button>
+    </div>
+</div>
+
 <script>
 // ----------------------------
-// VARIABLES
+// VARIABLES & CONFIG
 // ----------------------------
-let money = 10000;
+let money = 0; // default 0 until logged in
 let gold = 0;
-let goldPrice = 0;
-const API_KEY = "goldapi-6bfwx4smhyjr407-io";
+// Use a fixed default gold price (USD per oz). GoldAPI removed.
+const DEFAULT_GOLD_PRICE = 2000; // change this value if you want a different static price
+let goldPrice = DEFAULT_GOLD_PRICE;
+// Replace this with your deployed Apps Script Web App URL
+const APP_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzHlZ-qhEIcvh5V-PQ2xlvyC3qsNqsWR_NINPXxDsh5emCZTieiiPrMBF_tFC3vrEky/exec";
+
+// ----------------------------
+// GOLD PRICE (STATIC)
+// External GoldAPI removed. Use a fixed price to avoid external dependency/CORS.
+async function loadGoldPrice() {
+    // assign the default static price; keep function async for compatibility
+    goldPrice = DEFAULT_GOLD_PRICE;
+}
 
 // ----------------------------
 // INITIAL LOAD
 // ----------------------------
 window.onload = async () => {
-    await loadGoldPrice();
+    // call loadGoldPrice but don't let it block UI update on error
+    try { await loadGoldPrice(); } catch (e) { console.warn(e); }
+    try { await checkAuthAndLoad(); } catch (e) { console.warn(e); }
+    try { await fetchMarket(); } catch (e) { console.warn(e); }
     updateDisplay();
 };
 
 // ----------------------------
-// FETCH GOLD PRICE (GoldAPI)
+// Apps Script API helper
 // ----------------------------
-async function loadGoldPrice() {
+async function apiRequest(action, payload = {}) {
     try {
-        const response = await fetch("https://www.goldapi.io/api/XAU/USD", {
-            method: "GET",
-            headers: {
-                "x-access-token": API_KEY,
-                "Content-Type": "application/json"
-            }
+        // Use form-encoded body to avoid CORS preflight (no custom headers)
+        const params = new URLSearchParams(Object.assign({ action }, payload));
+        const res = await fetch(APP_SCRIPT_URL, {
+            method: 'POST',
+            body: params // browser sets Content-Type: application/x-www-form-urlencoded
         });
-
-        const data = await response.json();
-        goldPrice = data.price; // USD per oz
-    } catch {
-        alert("Internet required to fetch real-time gold data.");
+        return await res.json();
+    } catch (err) {
+        console.error('API request error', err);
+        alert('Server error (check Apps Script URL, deployment, or network).');
+        return { success: false, error: err.message };
     }
 }
 
 // ----------------------------
-// UPDATE UI
+// MARKET FETCHING & UI
+// ----------------------------
+async function fetchMarket() {
+    try {
+        const resp = await apiRequest('getMarket');
+        if (resp && resp.success && resp.market) {
+            // market: { Available: ..., Price: ... }
+            const price = parseFloat(resp.market.Price) || DEFAULT_GOLD_PRICE;
+            const available = parseFloat(resp.market.Available) || 0;
+            goldPrice = price;
+            document.getElementById('priceDisplay').textContent = 'Market Price $ ' + price.toFixed(2) + ' / oz';
+            document.getElementById('availableDisplay').textContent = 'Available Gold in Market: ' + available.toFixed(2) + ' oz';
+        } else {
+            // fallback to defaults
+            document.getElementById('priceDisplay').textContent = '$ ' + DEFAULT_GOLD_PRICE.toFixed(2) + ' / oz';
+            document.getElementById('availableDisplay').textContent = 'Available: 0.00 oz';
+        }
+    } catch (err) {
+        console.warn('fetchMarket error', err);
+    }
+}
+
+// ----------------------------
+// AUTH / USER LOAD
+// ----------------------------
+function isLoggedIn() { return !!localStorage.getItem('gtes_user_email'); }
+
+async function checkAuthAndLoad() {
+    const email = localStorage.getItem('gtes_user_email');
+    if (!email) {
+        // not logged in: show zero balances
+        money = 0;
+        gold = 0;
+        document.getElementById('moneyDisplay').textContent = '$ 0.00';
+        document.getElementById('goldDisplay').textContent = '0.00 oz';
+        return;
+    }
+
+    // fetch real-time user data from Apps Script
+    const resp = await apiRequest('getUser', { email });
+    if (resp && resp.success && resp.user) {
+        money = parseFloat(resp.user.Money) || 0;
+        gold = parseFloat(resp.user.Gold) || 0;
+        updateDisplay();
+    } else {
+        // if user missing, sign out locally
+        localStorage.removeItem('gtes_user_email');
+        money = 0;
+        gold = 0;
+        document.getElementById('moneyDisplay').textContent = '$ 0.00 (log in first)';
+        document.getElementById('goldDisplay').textContent = '0.00 oz';
+    }
+}
+
+// ----------------------------
+// UI UPDATE
 // ----------------------------
 function updateDisplay() {
-    document.getElementById("moneyDisplay").textContent = "$ " + money.toFixed(2);
-    document.getElementById("goldDisplay").textContent = gold.toFixed(2) + " oz";
+    const mEl = document.getElementById('moneyDisplay');
+    const gEl = document.getElementById('goldDisplay');
+    if (!isLoggedIn()) {
+        mEl.textContent = '$ 0.00';
+        gEl.textContent = '0.00 oz';
+    } else {
+        mEl.textContent = '$ ' + money.toFixed(2);
+        gEl.textContent = gold.toFixed(2) + ' oz';
+    }
 }
 
 // ----------------------------
-// POPUPS
+// POPUPS & AUTH UI
 // ----------------------------
-function openBuyPopup() { document.getElementById("buyPopup").style.display = "flex"; }
-function closeBuyPopup() { document.getElementById("buyPopup").style.display = "none"; }
-function openSellPopup() { document.getElementById("sellPopup").style.display = "flex"; }
-function closeSellPopup() { document.getElementById("sellPopup").style.display = "none"; }
+function openBuyPopup() { document.getElementById('buyPopup').style.display = 'flex'; }
+function closeBuyPopup() { document.getElementById('buyPopup').style.display = 'none'; }
+function openSellPopup() { document.getElementById('sellPopup').style.display = 'flex'; }
+function closeSellPopup() { document.getElementById('sellPopup').style.display = 'none'; }
+function openAccountPopup() { 
+    document.getElementById('accountPopup').style.display = 'flex';
+    // update popup depending on signed-in state
+    updateAccountPopupView();
+}
+function closeAccountPopup() { document.getElementById('accountPopup').style.display = 'none'; }
+
+function showSignIn() {
+    document.getElementById('signInBox').style.display = 'block';
+    document.getElementById('signUpBox').style.display = 'none';
+}
+
+function showSignUp() {
+    document.getElementById('signInBox').style.display = 'none';
+    document.getElementById('signUpBox').style.display = 'block';
+}
+
+function updateAccountPopupView() {
+    if (isLoggedIn()) {
+        // show signed-in view
+        const email = localStorage.getItem('gtes_user_email');
+        document.getElementById('signedInEmail').textContent = email;
+        document.getElementById('signedInBox').style.display = 'block';
+        document.getElementById('signInBox').style.display = 'none';
+        document.getElementById('signUpBox').style.display = 'none';
+        // hide auth tabs when signed in
+        document.getElementById('authTabs').style.display = 'none';
+    } else {
+        // not signed in: show sign in tab by default
+        document.getElementById('authTabs').style.display = 'block';
+        document.getElementById('signedInBox').style.display = 'none';
+        showSignIn();
+    }
+}
+
+function signOut() {
+    localStorage.removeItem('gtes_user_email');
+    money = 0;
+    gold = 0;
+    updateDisplay();
+    // update popup to show sign-in
+    updateAccountPopupView();
+    closeAccountPopup();
+    alert('Signed out.');
+}
 
 // ----------------------------
-// BUY GOLD
+// SIGN UP
+// ----------------------------
+async function signUp() {
+    const email = document.getElementById('signupEmail').value.trim();
+    const password = document.getElementById('signupPassword').value;
+    if (!email || !password) { alert('Provide email and password.'); return; }
+
+    const resp = await apiRequest('signup', { email, password });
+    if (resp && resp.success) {
+        // auto sign-in
+        localStorage.setItem('gtes_user_email', email);
+        money = parseFloat(resp.user.Money) || 10000;
+        gold = parseFloat(resp.user.Gold) || 0;
+        try { await fetchMarket(); } catch (e) { console.warn(e); }
+        updateDisplay();
+        closeAccountPopup();
+        alert('Account created and signed in.');
+    } else {
+        alert('Sign up failed: ' + (resp.error || resp.message || 'unknown'));
+    }
+}
+
+// ----------------------------
+// SIGN IN
+// ----------------------------
+async function signIn() {
+    const email = document.getElementById('signinEmail').value.trim();
+    const password = document.getElementById('signinPassword').value;
+    if (!email || !password) { alert('Provide email and password.'); return; }
+
+    const resp = await apiRequest('signin', { email, password });
+    if (resp && resp.success && resp.user) {
+        localStorage.setItem('gtes_user_email', email);
+        money = parseFloat(resp.user.Money) || 0;
+        gold = parseFloat(resp.user.Gold) || 0;
+        try { await fetchMarket(); } catch (e) { console.warn(e); }
+        updateDisplay();
+        closeAccountPopup();
+        alert('Signed in.');
+    } else {
+        alert('Sign in failed: ' + (resp.error || resp.message || 'invalid credentials'));
+    }
+}
+
+// ----------------------------
+// BUY GOLD (uses user data)
 // ----------------------------
 async function buyGold() {
-    await loadGoldPrice();
-    let oz = parseFloat(document.getElementById("buyAmount").value);
-    if (isNaN(oz) || oz < 0.1) {
-        alert("Minimum 0.1 oz.");
-        return;
+    if (!isLoggedIn()) { alert('Please log in first.'); return; }
+    // perform buy via server-side transaction to keep market in sync
+    let oz = parseFloat(document.getElementById('buyAmount').value);
+    if (isNaN(oz) || oz < 0.1) { alert('Minimum 0.1 oz.'); return; }
+    const email = localStorage.getItem('gtes_user_email');
+    const resp = await apiRequest('buy', { email: email, oz: oz.toString() });
+    if (resp && resp.success && resp.user) {
+        money = parseFloat(resp.user.Money) || 0;
+        gold = parseFloat(resp.user.Gold) || 0;
+        if (resp.market && resp.market.Price) {
+            goldPrice = parseFloat(resp.market.Price) || goldPrice;
+            document.getElementById('priceDisplay').textContent = '$ ' + goldPrice.toFixed(2) + ' / oz';
+        }
+        if (resp.market && resp.market.Available !== undefined) {
+            document.getElementById('availableDisplay').textContent = 'Available: ' + (parseFloat(resp.market.Available)||0).toFixed(2) + ' oz';
+        }
+        updateDisplay();
+        closeBuyPopup();
+        alert('Purchase successful.');
+    } else {
+        alert('Purchase failed: ' + (resp.error || resp.message || 'unknown'));
     }
-
-    let cost = oz * goldPrice;
-    if (money < cost) {
-        alert("Not enough balance.");
-        return;
-    }
-
-    money -= cost;
-    gold += oz;
-    updateDisplay();
-    closeBuyPopup();
 }
 
 // ----------------------------
-// SELL GOLD
+// SELL GOLD (uses user data)
 // ----------------------------
 async function sellGold() {
-    await loadGoldPrice();
-    let oz = parseFloat(document.getElementById("sellAmount").value);
-
-    if (isNaN(oz) || oz < 0.1) {
-        alert("Minimum 0.1 oz.");
-        return;
+    if (!isLoggedIn()) { alert('Please log in first.'); return; }
+    // perform sell via server-side transaction
+    let oz = parseFloat(document.getElementById('sellAmount').value);
+    if (isNaN(oz) || oz < 0.1) { alert('Minimum 0.1 oz.'); return; }
+    const email = localStorage.getItem('gtes_user_email');
+    const resp = await apiRequest('sell', { email: email, oz: oz.toString() });
+    if (resp && resp.success && resp.user) {
+        money = parseFloat(resp.user.Money) || 0;
+        gold = parseFloat(resp.user.Gold) || 0;
+        if (resp.market && resp.market.Price) {
+            goldPrice = parseFloat(resp.market.Price) || goldPrice;
+            document.getElementById('priceDisplay').textContent = '$ ' + goldPrice.toFixed(2) + ' / oz';
+        }
+        if (resp.market && resp.market.Available !== undefined) {
+            document.getElementById('availableDisplay').textContent = 'Available: ' + (parseFloat(resp.market.Available)||0).toFixed(2) + ' oz';
+        }
+        updateDisplay();
+        closeSellPopup();
+        alert('Sell successful.');
+    } else {
+        alert('Sell failed: ' + (resp.error || resp.message || 'unknown'));
     }
-
-    if (gold < oz) {
-        alert("Not enough gold.");
-        return;
-    }
-
-    let revenue = oz * goldPrice;
-    let fee = revenue * 0.05; // 5%
-    let finalReceive = revenue - fee;
-
-    gold -= oz;
-    money += finalReceive;
-
-    updateDisplay();
-    closeSellPopup();
 }
 </script>
 
